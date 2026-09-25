@@ -157,10 +157,44 @@ def get_fingertips_and_valleys(binarized, return_center=False):
             fingertips.append(max_pnt)
     
     # Finding valleys
-    defects = cv2.convexityDefects(contours_list, hull_idx)
+    # OpenCV 5 validates the convex-hull index order more strictly.
+    # The contour is stored internally by OpenCV as (x, y), while this
+    # project uses (row, col).  Swapping the coordinates in-place above can
+    # make convexityDefects reject an otherwise valid hull.  Rebuild a native
+    # OpenCV contour and calculate the hull from exactly that contour.
+    contour_cv = np.ascontiguousarray(contours_list[:, ::-1].reshape(-1, 1, 2), dtype=np.int32)
+    hull_idx_cv = cv2.convexHull(contour_cv, returnPoints=False)
+
+    if hull_idx_cv is None or len(hull_idx_cv) < 3:
+        print('Error: invalid convex hull')
+        return
+
+    try:
+        defects = cv2.convexityDefects(contour_cv, hull_idx_cv)
+    except cv2.error as exc:
+        # Some segmented masks may still produce a self-intersecting contour.
+        # Simplify it slightly and retry instead of aborting the whole run.
+        perimeter = cv2.arcLength(contour_cv, True)
+        contour_simple = cv2.approxPolyDP(contour_cv, 0.001 * perimeter, True)
+        hull_simple = cv2.convexHull(contour_simple, returnPoints=False)
+        try:
+            defects_simple = (cv2.convexityDefects(contour_simple, hull_simple)
+                              if hull_simple is not None and len(hull_simple) >= 3 else None)
+        except cv2.error:
+            defects_simple = None
+
+        if defects_simple is None:
+            print('Error: bad/self-intersecting hand contour:', exc)
+            return
+
+        # approxPolyDP changed the contour indices, so use the simplified
+        # contour (converted back to row/col) for valley lookup below.
+        contours_list = contour_simple.reshape(-1, 2)[:, ::-1].copy()
+        defects = defects_simple
+
     if defects is None:
         print('Error: bad image')
-        return		
+        return
     defects_idx = defects[..., 2].ravel()
     defects_depth = defects[..., 3].ravel()
     if fingertip_farthest is not None:
